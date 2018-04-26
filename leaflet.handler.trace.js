@@ -1,11 +1,13 @@
 
 L.Handler.Trace = L.Handler.extend({
   options: {
+    // poly
   },
   /** Tracing Handler
   * @param {Object} options
-  * @param {Object} options.tracerOptions - Options for the tracer marker. See {@link http://leafletjs.com/reference-0.7.7.html#marker-options }
+  * @param {(L.Marker|L.CircleMarker)} [options.tracer = circleMarker] - Options for the tracer marker. See {@link http://leafletjs.com/reference-0.7.7.html#marker-options }
   * @param {L.Polyline} options.poly - The Path to follow
+  * @param {number} [options.shownIndex = 0] - Which vertex of the poly should we start at?
   */
   initialize: function(options){
     //L.Handler.prototype.initialize.call(this, map);
@@ -15,13 +17,15 @@ L.Handler.Trace = L.Handler.extend({
 
     var initLatLng;
     if (this.options.poly){
+/*
       var latlngs = this.options.poly.getLatLngs();
       initLatLng = latlngs[shownIndex];
+*/
     }
     else{
       console.warn('no poly to trace.');
     }
-    this._tracer = (this.options.tracerOptions && L.Marker(initLatLng, this.options.tracerOptions)) || L.circleMarker(initLatLng, {color:'green', fillOpacity:1});
+    this._tracer = this.options.tracer || L.circleMarker(null, {color:'green', fillOpacity:1});//).setLatLng(initLatLng);
 
   },
   addHooks: function(){
@@ -31,41 +35,72 @@ L.Handler.Trace = L.Handler.extend({
     // Index must be within range of 0 to number of latlngs on this path
     this.shownIndex = Math.max(Math.min(this.shownIndex, latlngs.length-1), 0)
     this._tracer.setLatLng(this._poly.getLatLngs()[this.shownIndex]);
-    this._tracer.addTo(map);
-    this.trace(map, 1000);
+    this._tracer.addTo(this._poly._map);
+    this.trace(this._poly._map, 1000);
   },
+  /** Trace a whole shape at a constant speed. Note: Due to variance in distances caused by map projections the speed of a marker may appear slower at the equator for example.
+  * @param {ILayer}
+  * @param {number} duration - The duration of the trace in ms
+  */
+  traceShape: function(poly, duration){
+    var latlngs = poly.getLatLngs();
+    // TODO, consider projections vs distances over global scales and instructions other than lineto
+    // Get total distance
+    var distances = latlngs.map(function(latlng, l, latlngs){
+      if (l < latlngs.length - (poly instanceof L.Polygon ? 0 : 1)){
+        return latlng.distanceTo(latlngs[l]);
+      }
+    }, this).filter(function(v){return v;});
+    var totalDistance = distances.reduce(function(a, b){return a + b}, 0);
+
+    // Get the duration for each step based on the distance between points
+    this.durations = distances.map(function(distance, d, distances){
+      return duration * (distance / totalDistance);
+    }, this);
+
+  }
   /** Moves a marker about the polyline/polygon to illustrate the order of the points that define it
+  * @param {L.Map} map
+  * @param {number} stepLength - The amount of time in ms to take tracing each segment.
+  * Note: this means that the tracer will move faster along long segments, and slower on short segments.
 	*/
 	trace: function(map, stepLength){
 		var latlngs = this._poly.getLatLngs();
     var crs = this._poly._map.options.crs;
 		var shownIndex = this.shownIndex || 0;
 		var traceStart = performance.now();
-		stepLength = stepLength || 1000;
+		stepLength = stepLength || this.durations[shownIndex] || 1000;
 		var animFunc = function(timestamp){
+      var timeSinceTraceCalled = timestamp - traceStart;
 			//timestamp of first request is at the start of the frame, so will probably be before performance.now() call
-			var showIndex = Math.max(0, Math.floor((timestamp - traceStart)/stepLength)); // increases by 1 every stepLength ms
+
+      // increases by 1 every variable stepLength ms
+      var showIndex = Math.max(0, Math.floor(timeSinceTraceCalled/stepLength));
+
       // Sync animation if for some reason it is still
-			if (showIndex !== shownIndex){
+			if (showIndex !== this.shownIndex){
 				if (showIndex < latlngs.length){
 					tracer.setLatLng(latlngs[showIndex]);
 				}
 				else{
 					// destroy marker
-					(map||this._map).removeLayer(tracer);
+					(this._poly._map || map || this._map).removeLayer(tracer);
 				}
 			}
 			else{
 				if (showIndex < latlngs.length-1){
 					// Percentage from one to the other
-					var perc = (timestamp - traceStart)/stepLength - showIndex;
+          // Gets the number of stepLengths up to this point eg. 4.5 is halfway between the 4th and 5th point,
+          // then removes the currently shown index (eg. 4) to get the sub-segment remainder (eg. 0.5)
+          var perc = timeSinceTraceCalled/(this.durations[showIndex]||stepLength) - showIndex;
+
           // Assuming Polyline or Polygon: Straight lines between latlngs TODO fix to work only with points until latlng needed
           var newlatlng = this._getLatLngOnLineTo(crs, latlngs[showIndex], latlngs[showIndex+1], perc);
-					tracer.setLatLng();
+					tracer.setLatLng(newlatlng);
 				}
 			}
 
-			shownIndex = showIndex;
+			this.shownIndex = showIndex;
       // Keep animating until we reach the end of the latlngs
 			if (showIndex <= latlngs.length-1){
 				L.Util.requestAnimFrame(animFunc, this);
